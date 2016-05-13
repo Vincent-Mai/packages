@@ -1,0 +1,111 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2008-2012 OpenWrt.org
+
+START=60
+
+smb_header() {
+	local interface
+	config_get interface $1 interface "loopback lan"
+
+	# resolve interfaces
+	local interfaces=$(
+		. /lib/functions/network.sh
+
+		local net
+		for net in $interface; do
+			local device
+			network_get_device device "$net" && {
+				local subnet
+				network_get_subnet  subnet "$net" && echo -n "$subnet "
+				network_get_subnet6 subnet "$net" && echo -n "$subnet "
+			}
+
+			echo -n "${device:-$net} "
+		done
+	)
+
+	local name workgroup description charset
+	local hostname="$(uci_get system.@system[0].hostname)"
+
+	config_get name        $1 name        "${hostname:-OpenWrt}"
+	config_get workgroup   $1 workgroup   "${hostname:-OpenWrt}"
+	config_get description $1 description "Samba on ${hostname:-OpenWrt}"
+	config_get charset     $1 charset     "UTF-8"
+	config_get enabled     $1 enabled
+	config_get uenabled    $1 uenabled
+	config_get user        $1 user
+	config_get password    $1 password
+
+	mkdir -p /var/etc
+	sed -e "s#|NAME|#$name#g" \
+	    -e "s#|WORKGROUP|#$workgroup#g" \
+	    -e "s#|DESCRIPTION|#$description#g" \
+	    -e "s#|INTERFACES|#$interfaces#g" \
+	    -e "s#|CHARSET|#$charset#g" \
+	    /etc/samba/smb.conf.template > /var/etc/smb.conf
+
+	local homes
+	config_get_bool homes $1 homes 0
+
+	[ -L /etc/samba/smb.conf ] || ln -nsf /var/etc/smb.conf /etc/samba/smb.conf
+}
+
+smb_add_share() {
+	local name
+	local path
+	local users
+	local read_only
+	local guest_ok
+	local create_mask
+	local dir_mask
+
+	config_get name $1 name
+	config_get path $1 path
+	config_get users $1 users
+	config_get read_only $1 read_only
+	config_get guest_ok $1 guest_ok
+	config_get create_mask $1 create_mask
+	config_get dir_mask $1 dir_mask
+
+	[ -z "$name" -o -z "$path" ] && return
+
+	echo -e "\n[$name]\n\tpath = $path" >> /var/etc/smb.conf
+	[ -n "$users" ] && echo -e "\tvalid users = $users" >> /var/etc/smb.conf
+	[ -n "$read_only" ] && echo -e "\tread only = $read_only" >> /var/etc/smb.conf
+	[ -n "$guest_ok" ] && echo -e "\tguest ok = $guest_ok" >> /var/etc/smb.conf
+	[ -n "$create_mask" ] && echo -e "\tcreate mask = $create_mask" >> /var/etc/smb.conf
+	[ -n "$dir_mask" ] && echo -e "\tdirectory mask = $dir_mask" >> /var/etc/smb.conf
+}
+
+start() {
+	config_load samba
+	config_foreach smb_header samba
+	config_foreach smb_add_share sambashare
+
+	if [ "$uenabled" == 1 ];then
+		addgroup $user
+		adduser -g $user -s /bin/false -D -h /mnt $user
+		echo -e $password'\n'$password >/tmp/passwd
+		smbpasswd -a -s $user </tmp/passwd
+		rm -f /tmp/passwd
+	else
+		rm -f /etc/samba/smbpasswd
+	fi
+
+	if [ "$enabled" == 1 ];then
+		start_smb
+	else
+		stop
+	fi
+}
+
+start_smb() {
+	service_start /usr/sbin/smbd -D
+	service_start /usr/sbin/nmbd -D
+}
+
+stop() {
+	service_stop /usr/sbin/smbd
+	service_stop /usr/sbin/nmbd
+}
+

@@ -47,6 +47,25 @@ define Package/pptpd/conffiles
 /etc/config/pptpd
 endef
 
+define Package/pptpd/postinst
+#!/bin/sh
+uci -q batch <<-EOF >/dev/null
+        delete firewall.pptpd
+        set firewall.pptpd=include
+        set firewall.pptpd.type=script
+        set firewall.pptpd.path=/var/firewall.pptpd
+        set firewall.pptpd.reload=0
+        delete firewall.pptpd-auto
+        set firewall.pptpd-auto=include
+        set firewall.pptpd-auto.type=script
+        set firewall.pptpd-auto.path=/var/firewall.pptpd.auto
+        set firewall.pptpd-auto.reload=1
+	commit firewall
+EOF
+
+exit 0
+endef
+
 define Package/pptpd/install
 	$(INSTALL_DIR) $(1)/usr/sbin
 	$(CP) \
