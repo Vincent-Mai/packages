@@ -1,5 +1,7 @@
 #!/bin/sh /etc/rc.common
 # Copyright (C) 2006 OpenWrt.org
+# Rewrite By Kanzaki Tsukasa (github.com@tksmai) 2017-03
+# Thanks @981213 from right.com (github.com@981213)
 
 START=60
 BIN=/usr/sbin/pptpd
@@ -8,12 +10,18 @@ RUN_D=/var/run
 PID_F=$RUN_D/$BIN.pid
 CONFIG=/var/etc/pptpd.conf
 CHAP_SECRETS=/var/etc/chap-secrets
+REAL_CHAP_SECRETS=/etc/ppp/chap-secrets
+OPTIONS_FILE=/etc/ppp/options.pptpd
 FIREWALL_CONF=/var/firewall.pptpd
 FIREWALL_CONF_AUTO=/var/firewall.pptpd.auto
 
+reload_fw3() {
+	sleep 3
+	fw3 restart 2>&1 | logger
+}
 setup_dns() {
 	[ -n "$1" ] || return 0
-	echo ms-dns $1>>/etc/ppp/options.pptpd
+	echo ms-dns $1 >> $OPTIONS_FILE
 }
 setup_login() {
 	local section="$1"
@@ -32,6 +40,8 @@ setup_login() {
 	[ -n "$password" ] || return 0
 
 	echo "$username * $password $ipaddress" >> $CHAP_SECRETS
+	logger "configured user $username"
+	return 0
 	## echo "$username pptp-server $password *" >> $CHAP_SECRETS
 }
 
@@ -52,7 +62,7 @@ setup_config() {
 	## Code by VPN Server ##
 	config_get nat "$section" nat
 	config_get internet "$section" internet
-	echo Update firewall ...
+	echo "Update firewall ..."
 	sed -i -e "/## luci-app-pptpd/d" $FIREWALL_CONF
 	sed -i -e "/## luci-app-pptpd/d" $FIREWALL_CONF_AUTO
 	if [ "$nat" -eq 1 ]; then
@@ -60,22 +70,34 @@ setup_config() {
 		echo "iptables -A forwarding_rule -o ppp+ -j ACCEPT ## luci-app-pptpd" >> $FIREWALL_CONF
 		echo "iptables -A output_rule -o ppp+ -j ACCEPT ## luci-app-pptpd" >> $FIREWALL_CONF
 		echo "iptables -t nat -A prerouting_rule -i ppp+ -j zone_lan_prerouting ## luci-app-pptpd" >> $FIREWALL_CONF_AUTO
-		echo Update NAT rule ...
+		echo "Update NAT rule ..."
+	else
+		echo "iptables -A forwarding_rule -i ppp+ -j DROP ## luci-app-pptpd" >> $FIREWALL_CONF
+		echo "iptables -A forwarding_rule -o ppp+ -j DROP ## luci-app-pptpd" >> $FIREWALL_CONF
+		echo "iptables -A output_rule -o ppp+ -j DROP ## luci-app-pptpd" >> $FIREWALL_CONF
+		echo "iptables -t nat -A prerouting_rule -i ppp+ -j DROP ## luci-app-pptpd" >> $FIREWALL_CONF_AUTO
+		echo "Update NAT rule ..."
 	fi
 	if [ "$internet" -eq 1 ]; then
 		echo "iptables -A input_wan_rule -p tcp --dport 1723 -j ACCEPT ## luci-app-pptpd" >> $FIREWALL_CONF
 		echo "iptables -A input_wan_rule -p tcp --dport 47 -j ACCEPT ## luci-app-pptpd" >> $FIREWALL_CONF
 		echo "iptables -A input_wan_rule -p gre -j ACCEPT ## luci-app-pptpd" >> $FIREWALL_CONF
 		echo "iptables -A input_rule -i ppp+ -j ACCEPT ## luci-app-pptpd" >> $FIREWALL_CONF
-		echo Update input rule ...
+		echo "Update input rule ..."
+	else
+		echo "iptables -A input_wan_rule -p tcp --dport 1723 -j DROP ## luci-app-pptpd" >> $FIREWALL_CONF
+		echo "iptables -A input_wan_rule -p tcp --dport 47 -j DROP ## luci-app-pptpd" >> $FIREWALL_CONF
+		echo "iptables -A input_wan_rule -p gre -j ACCEPT ## luci-app-pptpd" >> $FIREWALL_CONF
+		echo "iptables -A input_rule -i ppp+ -j ACCEPT ## luci-app-pptpd" >> $FIREWALL_CONF
+		echo "Update input rule ..."
 	fi
-	fw3 restart
+	reload_fw3&
 	config_get mppe "$section" mppe
-	sed -i -e 's/#*mppe/mppe/g' /etc/ppp/options.pptpd
+	sed -i -e 's/#*mppe/mppe/g' $OPTIONS_FILE
 	if [ "$mppe" -eq 0 ]; then
-		sed -i -e 's/mppe/#mppe/g' /etc/ppp/options.pptpd
+		sed -i -e 's/mppe/#mppe/g' $OPTIONS_FILE
 	fi
-	sed -i -e '/ms-dns/d' /etc/ppp/options.pptpd
+	sed -i -e '/ms-dns/d' $OPTIONS_FILE
 	config_list_foreach "pptpd" "dns" setup_dns
 	## Code by VPN Server ##
 
@@ -88,8 +110,9 @@ start_pptpd() {
 	for m in arc4 sha1_generic slhc crc-ccitt ppp_generic ppp_async ppp_mppe; do
 		insmod $m >/dev/null 2>&1
 	done
-	ln -sfn $CHAP_SECRETS /etc/ppp/chap-secrets
+	ln -sfn $CHAP_SECRETS $REAL_CHAP_SECRETS
 	service_start $BIN $OPTIONS -c $CONFIG
+	logger "pptpd start"
 }
 
 start() {
@@ -108,16 +131,17 @@ start() {
 	EOF
 	config_load pptpd
 	setup_config pptpd || return
-	rm $CHAP_SECRETS
+	[ -f $CHAP_SECRETS ] && rm $CHAP_SECRETS
 	config_foreach setup_login login
 	start_pptpd
 }
 
 stop() {
 	service_stop $BIN
-
+	logger "pptpd stop"
 	## Code by VPN Server ##
 	sed -i -e "/## luci-app-pptpd/d" $FIREWALL_CONF
-	fw3 restart
+	reload_fw3&
+	return 0
 	## Code by VPN Server ##
 }
